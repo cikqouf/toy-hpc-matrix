@@ -13,9 +13,6 @@
       <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
       <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav</Extensions>
     </Filter>
-    <Filter Include="asm">
-      <UniqueIdentifier>{f0f9eed8-64f4-412b-8516-979f2a32ba61}</UniqueIdentifier>
-    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\main.cpp">
@@ -26,10 +23,5 @@
     <ClInclude Include="mathpponlylib\mat.hpp">
       <Filter>Header Files</Filter>
     </ClInclude>
-  </ItemGroup>
-  <ItemGroup>
-    <None Include="matHppOnlyProj\x64\generateAssembly\main.asm">
-      <Filter>asm</Filter>
-    </None>
   </ItemGroup>
 </Project>

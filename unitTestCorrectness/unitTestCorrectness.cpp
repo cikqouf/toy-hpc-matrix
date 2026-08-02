@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 
+#define MAT_THREAD_NUMS 16
 #include "mat.hpp"
 #include <random>
 #include <cmath>
@@ -17,9 +18,7 @@ namespace unitTestCorrectness
         {
             using T = float;
 
-            std::mt19937 rng(123);
-            std::normal_distribution<T> dist(3.0, 1.0);
-
+            std::normal_distribution<T> dist(0., 1.);
             mat<T> A(p, q, dist);
             mat<T> B(q, s, dist);
 
