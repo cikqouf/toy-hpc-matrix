@@ -26,7 +26,6 @@ namespace unitTestCorrectness
             mat<T> C = A * B;
             mat<T> C2(p, s, 0.0);
 
-            // naive reference
             for (int i = 0; i < p; ++i)
                 for (int k = 0; k < q; ++k)
                     for (int j = 0; j < s; ++j)
