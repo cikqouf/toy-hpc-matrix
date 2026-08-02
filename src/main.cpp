@@ -25,9 +25,6 @@ static void BM_MatMul(benchmark::State& state) {
     state.counters["GFLOPS"] = benchmark::Counter(flops / 1e9, benchmark::Counter::kIsRate);
 }
 
-// ----------------------------
-// 参数（多个 p/q/s）
-// ----------------------------
 BENCHMARK(BM_MatMul)
 ->Args({ 512, 512, 512 })
 ->Args({ 1024, 1024, 1024 })
