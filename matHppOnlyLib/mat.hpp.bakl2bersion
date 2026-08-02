@@ -1,0 +1,545 @@
+﻿// mat.hpp just one header
+// for daily use
+
+/* L2 pack, then rearrange
+ * mem layout to fit l1 and kernel
+ */
+
+#include <iostream>
+#include <sstream>
+#include <cstring>
+#include <random>
+#include <algorithm>
+#include <unordered_map>
+
+#include <omp.h>
+#include <immintrin.h>
+
+#pragma once
+
+#ifndef MAT_THREAD_NUMS
+#define MAT_THREAD_NUMS 1
+#endif
+
+template <typename NumType>
+class mat;
+
+// /* 模板特化 不同类型对应不同分块 /////
+template<typename T> struct NumTypeToN;
+template <>
+struct NumTypeToN<float> {
+
+	static constexpr int L3X = 512; // 512
+	static constexpr int L3Y = 144; // 768
+	static constexpr int L3Z = 144; // 768
+	static constexpr int L3LEFTSIZE = L3Y * L3X; // 必须是 32 的倍数
+	static constexpr int L3RIGHTSIZE = L3X * L3Z; // 必须是 32 的倍数
+
+	static constexpr int L1X = 256; // 256
+	static constexpr int L1Y = 8; // 8
+	static constexpr int L1Z = 8; // 8
+};
+template <>
+struct NumTypeToN<double> {
+	static constexpr int L2X = 512;
+	static constexpr int L2Y = 512;
+	static constexpr int L2Z = 512;
+	static constexpr int L2LEFTSIZE = L2Y * L2X;
+	static constexpr int L2RIGHTSIZE = L2X * L2Z;
+
+
+	static constexpr int L1X = 256;
+	static constexpr int L1Z = 8; // 这个要改
+	static constexpr int L1Y = 4;
+	static constexpr int L1LEFTSIZE = L1Y * L2X;
+	static constexpr int L1RIGHTSIZE = L2X * L1Z;
+};
+////////////////////
+// /* 模板偏特化 类型提取 /////
+template<typename T> struct InNumTypeOf;
+//////////////////////
+// /* mat operator * 用 /////
+template<typename U>
+struct InNumTypeOf<mat<U>> {
+	using type = U;
+};
+///////////////////////////////
+
+template <typename NumType>
+class mat {
+
+public:
+	// /* 行向量  /////
+	class rowVec;
+	///////////////////
+public:
+	class rowVec {
+		// /* rowVec 结构体 /////////////////
+	public:
+		int cols;
+		NumType* pData;
+		//////////////////////////////
+		// /* constructors ///////////
+	public:
+		rowVec() = delete;
+		rowVec(const rowVec& inVec) :
+			cols(inVec.cols), pData(static_cast<NumType*>(_aligned_malloc(sizeof(NumType)* cols, 32))) {
+			for (int i = 0; i < cols; ++i) {
+				pData[i] = inVec.pData[i];
+			}
+		}
+		rowVec(rowVec&& inVec) :
+			cols(inVec.cols), pData(inVec.pData) {
+			inVec.pData = nullptr;
+			inVec.cols = 0;
+		}
+	private:
+		rowVec(int inCols, NumType* inpData) : cols(inCols), pData(inpData) {}
+	public:
+		~rowVec() {
+			if (pData != nullptr) {
+				_aligned_free(pData);
+			}
+			cols = 0;
+		}
+		////////////////////////////////////
+		// /* rowVec operator 重载 //////////
+	public:
+		rowVec& operator=(const rowVec& inVec) {
+			if (pData != nullptr &&
+				pData != inVec.pData) {
+				_aligned_free(pData);
+			}
+			pData = static_cast<NumType*>(_aligned_malloc(sizeof(NumType) * inVec.cols, 32));
+			cols = inVec.cols;
+			for (int i = 0; i < cols; ++i) {
+				pData[i] = inVec.pData[i];
+			}
+			return *this;
+		}
+		rowVec& operator=(rowVec&& inVec) {
+			if (pData != nullptr &&
+				pData != inVec.pData) {
+				_aligned_free(pData);
+			}
+			pData = inVec.pData;
+			cols = inVec.cols;
+			inVec.pData = nullptr;
+			inVec.cols = 0;
+			return *this;
+		}
+		NumType operator[](int loc) const {
+			if (loc >= cols) {
+				std::stringstream message;
+				message << "oneVec[]col Error: "
+					<< "loc: " << loc
+					<< " cols: " << cols << '\n';
+				std::cerr << message.str();
+				throw std::runtime_error(message.str());
+			}
+			return pData[loc];
+		}
+		operator mat() {
+			NumType* data = static_cast<NumType*>(_aligned_malloc(sizeof(NumType) * cols, 32));
+			memcpy(data, pData, sizeof(NumType) * cols);
+			return mat<NumType>(1, cols, data);
+		}
+		//////////////////////////////
+		// /* who is your true friend ? /////
+		friend mat;
+		/////////////////////////////////////
+	};
+
+	// /* mat 结构体 ///////////////////
+public:
+	int rows;
+	int cols;
+	int len;
+	NumType* pData;
+	//////////////////////////////
+
+	// /* mat constructors //////////////////////////
+private:
+	// for later operator *
+	mat(int inRows, int inCols, NumType* inpData) :
+		rows(inRows), cols(inCols), len(inRows* inCols),
+		pData(inpData) {}
+public:
+	mat() = delete;
+	mat(int inRows, int inCols) :
+		rows(inRows), cols(inCols), len(inRows* inCols),
+		pData(static_cast<NumType*>(_aligned_malloc(sizeof(NumType)* len, 32))) {}
+	mat(int inRows, int inCols, NumType element) :
+		rows(inRows), cols(inCols), len(inRows* inCols),
+		pData(static_cast<NumType*>(_aligned_malloc(sizeof(NumType)* len, 32))) {
+		for (int i = 0; i < len; ++i) {
+			this->pData[i] = element;
+		}
+	}
+	template <typename RandomType>
+	mat(int inRows, int inCols, RandomType& inDis) :
+		rows(inRows), cols(inCols), len(inRows* inCols),
+		pData(static_cast<NumType*>(_aligned_malloc(sizeof(NumType)* len, 32))) {
+		std::random_device device;
+		std::mt19937 gen(device());
+		for (int i = 0; i < len; ++i) {
+			this->pData[i] = inDis(gen);
+		}
+	}
+	// /* xvalue you know. /////
+	mat(const mat& inM) :
+		rows(inM.rows), cols(inM.cols), len(inM.len),
+		pData(static_cast<NumType*>(_aligned_malloc(sizeof(NumType)* len, 32))) {
+		memcpy(pData, inM.pData, sizeof(NumType) * len);
+	}
+	mat(mat&& inM) noexcept :
+		rows(inM.rows), cols(inM.cols), len(inM.len),
+		pData(inM.pData) {
+		inM.pData = nullptr;
+		inM.rows = 0; inM.cols = 0; inM.len = 0;
+	}
+	~mat() {
+		if (pData != nullptr) {
+			_aligned_free(pData);
+		}
+		rows = 0; cols = 0; len = 0;
+	}
+	/////////////////////////////////////////////
+
+	// /* mat operator overwrite ////////////////////
+public:
+	mat& operator=(const mat& inM) {
+		rows = inM.rows;
+		cols = inM.cols;
+		len = inM.len;
+		if (pData != nullptr &&
+			pData != inM.pData) {
+			_aligned_free(pData);
+		}
+
+		pData = static_cast<NumType*>(_aligned_malloc(sizeof(NumType) * len, 32));
+		for (int i = 0; i < len; ++i) {
+			pData[i] = inM.pData[i];
+		}
+		return *this;
+	}
+
+	mat& operator=(mat&& inM) {
+		rows = inM.rows;
+		cols = inM.cols;
+		len = inM.len;
+		if (pData != nullptr &&
+			pData != inM.pData) {
+			_aligned_free(pData);
+		}
+		pData = inM.pData;
+		inM.pData = nullptr;
+		return *this;
+	}
+
+	template <typename InTypeLeft, typename InTypeRight>
+	friend mat operator+(const InTypeLeft& left, const InTypeRight& right) {
+		if constexpr (std::is_arithmetic_v<InTypeLeft> &&
+			std::is_same_v<InTypeRight, mat>) {
+			mat result = right;
+			for (int i = 0; i < result.len; ++i) {
+				result.pData[i] += left;
+			}
+			return result;
+		}
+		if constexpr (std::is_same_v<InTypeLeft, mat> &&
+			std::is_arithmetic_v<InTypeRight>) {
+			mat result = left;
+			for (int i = 0; i < result.len; ++i) {
+				result.pData[i] += right;
+			}
+			return result;
+		}
+		if constexpr (std::is_same_v<InTypeLeft, mat> &&
+			std::is_same_v<InTypeRight, mat>) {
+			if (left.rows != right.rows &&
+				left.cols != right.cols) {
+				std::stringstream message;
+				message << "left-rows: "
+					<< left.rows << " "
+					<< "right-rows: " << right.rows << " "
+					<< "left-cols: " << left.cols << " "
+					<< "right-cols: " << right.cols << '\n';
+				std::cerr << "operator+ Error: " << message.str();
+				throw std::runtime_error("");
+			}
+			mat result(left.rows, right.cols);
+			for (int i = 0; i < result.len; ++i) {
+				result.pData[i] = left.pData[i] + right.pData[i];
+			}
+			return result;
+		}
+		return mat(0, 0, nullptr);
+	}
+
+	template <typename InTypeLeft, typename InTypeRight>
+	friend mat operator-(const InTypeLeft& left, const InTypeRight& right) {
+		if constexpr (std::is_arithmetic_v<InTypeLeft> &&
+			std::is_same_v<InTypeRight, mat>) {
+			mat result = right;
+			for (int i = 0; i < result.len; ++i) {
+				result.pData[i] -= left;
+			}
+			return result;
+		}
+		if constexpr (std::is_same_v<InTypeLeft, mat> &&
+			std::is_arithmetic_v<InTypeRight>) {
+			mat result = left;
+			for (int i = 0; i < result.len; ++i) {
+				result.pData[i] -= right;
+			}
+			return result;
+		}
+		if constexpr (std::is_same_v<InTypeLeft, mat> &&
+			std::is_same_v<InTypeRight, mat>) {
+			if (left.rows != right.rows &&
+				left.cols != right.cols) {
+				std::stringstream message;
+				message << "left-rows: "
+					<< left.rows << " "
+					<< "right-rows: " << right.rows << " "
+					<< "left-cols: " << left.cols << " "
+					<< "right-cols: " << right.cols << '\n';
+				std::cerr << "operator+ Error: " << message.str();
+				throw std::runtime_error("");
+			}
+			mat result(left.rows, right.cols);
+			for (int i = 0; i < result.len; ++i) {
+				result.pData[i] = left.pData[i] - right.pData[i];
+			}
+			return result;
+		}
+		return mat(0, 0, nullptr);
+	}
+
+public:
+	template <typename InLeftType, typename InRightType>
+	friend mat operator*(const InLeftType& left, const InRightType& right) {
+		if constexpr (std::is_same_v<InLeftType, mat> &&
+			std::is_arithmetic_v<InRightType>) {
+			mat result = left;
+			for (int i = 0; i < left.len; ++i) {
+				result.pData[i] *= right;
+			}
+			return result;
+		}
+		if constexpr (std::is_arithmetic_v<InLeftType> &&
+			std::is_same_v<InRightType, mat>) {
+			mat result = right;
+			for (int i = 0; i < right.len; ++i) {
+				result.pData[i] *= left;
+			}
+			return result;
+		}
+		if constexpr (std::is_same_v<mat, InLeftType> &&
+			std::is_same_v<mat, InRightType>) {
+
+			// 提取类型 InNumType
+			using InNumType = typename InNumTypeOf<InLeftType>::type;
+
+			if constexpr (!std::is_same_v<InNumType, double> && !std::is_same_v<InNumType, float>) {
+				std::stringstream message;
+				message << "when mat * mat, <> should be double or float\n";
+				std::cerr << message.str();
+				throw std::runtime_error(message.str());
+			}
+
+			const int& p = left.rows, & q = left.cols,
+				& r = right.rows, & s = right.cols;
+			if (q != r) {
+				std::stringstream message;
+				message << "mat * Error: q: " << q << " r: " << r << '\n';
+				std::cerr << message.str();
+				throw std::runtime_error(message.str());
+			}
+			mat<InNumType> result(p, s, 0.);
+
+			InNumType* pLeftBlockL3Pool = static_cast<InNumType*> (_aligned_malloc(MAT_THREAD_NUMS * sizeof(InNumType) * NumTypeToN<InNumType>::L3LEFTSIZE, 32));
+			InNumType* pRightBlockL3Pool = static_cast<InNumType*>(_aligned_malloc(MAT_THREAD_NUMS * sizeof(InNumType) * NumTypeToN<InNumType>::L3RIGHTSIZE, 32));
+
+#pragma omp parallel num_threads(MAT_THREAD_NUMS) if (p > 500 && q > 500 && s > 500)
+			{
+				int threadID = omp_get_thread_num();
+				mat<InNumType> leftBlockL3(0, 0, pLeftBlockL3Pool + threadID * NumTypeToN<InNumType>::L3LEFTSIZE);
+				mat<InNumType> rightBlockL3(0, 0, pRightBlockL3Pool + threadID * NumTypeToN<InNumType>::L3RIGHTSIZE);
+				int tmpLeftBlockL1Rows = 0, tmpLeftBlockL1Cols = 0;
+				int tmpRightBlockL1Rows = 0, tmpRightBlockL1Cols = 0;
+#pragma omp for
+				for (int i = 0; i < p; i += NumTypeToN<InNumType>::L3Y) {
+					leftBlockL3.rows = NumTypeToN<InNumType>::L3Y > p - i ? p - i : NumTypeToN<InNumType>::L3Y;
+					for (int k = 0; k < q; k += NumTypeToN<InNumType>::L3X) {
+						rightBlockL3.rows = leftBlockL3.cols = NumTypeToN<InNumType>::L3X > q - k ? q - k : NumTypeToN<InNumType>::L3X;
+
+						int leftTotalLen = 0;
+						for (int ii = 0; ii < leftBlockL3.rows; ii += NumTypeToN<InNumType>::L1Y) {
+							tmpLeftBlockL1Rows =
+								NumTypeToN<InNumType>::L1Y > leftBlockL3.rows - ii ? leftBlockL3.rows - ii : NumTypeToN<InNumType>::L1Y;
+
+							int iOffsetLeft = (i + ii) * q;
+							for (int kk = 0; kk < leftBlockL3.cols; kk += NumTypeToN<InNumType>::L1X) {
+								tmpLeftBlockL1Cols =
+									NumTypeToN<InNumType>::L1X > leftBlockL3.cols - kk ? leftBlockL3.cols - kk : NumTypeToN<InNumType>::L1X;
+
+								int kOffsetLeft = k + kk;
+								for (int iii = 0; iii < tmpLeftBlockL1Rows; ++iii) {
+									int leftBlockL3Offset = iii + leftTotalLen;
+									int leftTotalOffset = iOffsetLeft + iii * q + kOffsetLeft;
+									for (int kkk = 0; kkk < tmpLeftBlockL1Cols; ++kkk) {
+										leftBlockL3.pData[kkk * tmpLeftBlockL1Rows + leftBlockL3Offset] = // 改成 col-major
+											left.pData[leftTotalOffset + kkk];
+									}
+								}
+								leftTotalLen += tmpLeftBlockL1Rows * tmpLeftBlockL1Cols;
+							}
+						}
+
+						for (int j = 0; j < s; j += NumTypeToN<InNumType>::L3Z) {
+							rightBlockL3.cols = NumTypeToN<InNumType>::L3Z > s - j ? s - j : NumTypeToN<InNumType>::L3Z;
+							int rightTotalLen = 0;
+							for (int kk = 0; kk < rightBlockL3.rows; kk += NumTypeToN<InNumType>::L1X) {
+								tmpRightBlockL1Rows =
+									NumTypeToN<InNumType>::L1X > rightBlockL3.rows - kk ? rightBlockL3.rows - kk : NumTypeToN<InNumType>::L1X;
+								int kOffsetRight = (k + kk) * s;
+								for (int jj = 0; jj < rightBlockL3.cols; jj += NumTypeToN<InNumType>::L1Z) {
+									tmpRightBlockL1Cols =
+										NumTypeToN<InNumType>::L1Z > rightBlockL3.cols - jj ? rightBlockL3.cols - jj : NumTypeToN<InNumType>::L1Z;
+									int jOffsetRight = j + jj;
+									for (int kkk = 0; kkk < tmpRightBlockL1Rows; ++kkk) {
+										int rightBlockL3Offset = kkk * tmpRightBlockL1Cols + rightTotalLen;
+										int rightTotalOffset = kOffsetRight + kkk * s + jOffsetRight;
+										memcpy(rightBlockL3.pData + rightBlockL3Offset, right.pData + rightTotalOffset,
+											sizeof(InNumType) * tmpRightBlockL1Cols);
+									}
+									rightTotalLen += tmpRightBlockL1Rows * tmpRightBlockL1Cols;
+								}
+							}
+
+							// compute
+							leftTotalLen = 0;
+							for (int ii = 0; ii < leftBlockL3.rows; ii += NumTypeToN<InNumType>::L1Y) {
+								tmpLeftBlockL1Rows =
+									NumTypeToN<InNumType>::L1Y > leftBlockL3.rows - ii ? leftBlockL3.rows - ii : NumTypeToN<InNumType>::L1Y;
+
+								rightTotalLen = 0;
+								for (int kk = 0; kk < leftBlockL3.cols; kk += NumTypeToN<InNumType>::L1X) {
+									tmpRightBlockL1Rows = tmpLeftBlockL1Cols =
+										NumTypeToN<InNumType>::L1X > leftBlockL3.cols - kk ? leftBlockL3.cols - kk : NumTypeToN<InNumType>::L1X;
+
+									InNumType* __restrict leftBlockL3Ptr = leftBlockL3.pData + leftTotalLen;
+									for (int jj = 0; jj < rightBlockL3.cols; jj += NumTypeToN<InNumType>::L1Z) {
+										tmpRightBlockL1Cols =
+											NumTypeToN<InNumType>::L1Z > rightBlockL3.cols - jj ? rightBlockL3.cols - jj : NumTypeToN<InNumType>::L1Z;
+
+										InNumType* __restrict rightBlockL3Ptr = rightBlockL3.pData + rightTotalLen;
+
+										// kernel 要根据 InNumType 走分支 这里只是 kernel 内的分支
+										if (tmpLeftBlockL1Rows == NumTypeToN<InNumType>::L1Y &&
+											tmpRightBlockL1Cols == NumTypeToN<InNumType>::L1Z) {
+											int resultBaseAddrIndex = (i + ii) * s + j + jj;
+											InNumType* resultBaseAddr = &result.pData[resultBaseAddrIndex];
+
+											__m256 cc0 = _mm256_load_ps(resultBaseAddr);
+											__m256 cc1 = _mm256_load_ps(resultBaseAddr + s);
+											__m256 cc2 = _mm256_load_ps(resultBaseAddr + 2 * s);
+											__m256 cc3 = _mm256_load_ps(resultBaseAddr + 3 * s);
+											__m256 cc4 = _mm256_load_ps(resultBaseAddr + 4 * s);
+											__m256 cc5 = _mm256_load_ps(resultBaseAddr + 5 * s);
+											__m256 cc6 = _mm256_load_ps(resultBaseAddr + 6 * s);
+											__m256 cc7 = _mm256_load_ps(resultBaseAddr + 7 * s);
+
+											InNumType* leftBaseAddr = leftBlockL3Ptr;
+											InNumType* rightBaseAddr = rightBlockL3Ptr;
+											for (int kkk = 0; kkk < tmpLeftBlockL1Cols; ++kkk) {
+												__m256 bb0 = _mm256_load_ps(rightBaseAddr);
+
+												cc0 = _mm256_fmadd_ps(_mm256_broadcast_ss(leftBaseAddr), bb0, cc0);
+												cc1 = _mm256_fmadd_ps(_mm256_broadcast_ss(leftBaseAddr + 1), bb0, cc1);
+												cc2 = _mm256_fmadd_ps(_mm256_broadcast_ss(leftBaseAddr + 2), bb0, cc2);
+												cc3 = _mm256_fmadd_ps(_mm256_broadcast_ss(leftBaseAddr + 3), bb0, cc3);
+												cc4 = _mm256_fmadd_ps(_mm256_broadcast_ss(leftBaseAddr + 4), bb0, cc4);
+												cc5 = _mm256_fmadd_ps(_mm256_broadcast_ss(leftBaseAddr + 5), bb0, cc5);
+												cc6 = _mm256_fmadd_ps(_mm256_broadcast_ss(leftBaseAddr + 6), bb0, cc6);
+												cc7 = _mm256_fmadd_ps(_mm256_broadcast_ss(leftBaseAddr + 7), bb0, cc7);
+
+												leftBaseAddr += NumTypeToN<InNumType>::L1Y;
+												rightBaseAddr += NumTypeToN<InNumType>::L1Z;
+											}
+
+											_mm256_store_ps(resultBaseAddr, cc0);
+											_mm256_store_ps(resultBaseAddr + s, cc1);
+											_mm256_store_ps(resultBaseAddr + 2 * s, cc2);
+											_mm256_store_ps(resultBaseAddr + 3 * s, cc3);
+											_mm256_store_ps(resultBaseAddr + 4 * s, cc4);
+											_mm256_store_ps(resultBaseAddr + 5 * s, cc5);
+											_mm256_store_ps(resultBaseAddr + 6 * s, cc6);
+											_mm256_store_ps(resultBaseAddr + 7 * s, cc7);
+										}
+										else {
+											int resultOffset1 = j + jj;
+											for (int iii = 0; iii < tmpLeftBlockL1Rows; ++iii) {
+												int resultOffset0 = (i + ii + iii) * s;
+												for (int kkk = 0; kkk < tmpLeftBlockL1Cols; ++kkk) {
+													int leftBlockL3PtrOffset = kkk * tmpLeftBlockL1Rows + iii;
+													int rightBlockL3PtrOffset = kkk * tmpRightBlockL1Cols;
+													for (int jjj = 0; jjj < tmpRightBlockL1Cols; ++jjj) {
+														result.pData[resultOffset0 + resultOffset1 + jjj] +=
+															leftBlockL3Ptr[leftBlockL3PtrOffset] *
+															rightBlockL3Ptr[rightBlockL3PtrOffset + jjj];
+													}
+												}
+											}
+										}
+
+										rightTotalLen += tmpRightBlockL1Rows * tmpRightBlockL1Cols;
+									} // jj
+
+									leftTotalLen += tmpLeftBlockL1Rows * tmpLeftBlockL1Cols;
+								} // kk
+							} // ii
+
+						} // j
+					} // k
+				} // i
+
+				leftBlockL3.pData = nullptr;
+				rightBlockL3.pData = nullptr;
+			} //omp
+
+			_aligned_free(pLeftBlockL3Pool);
+			_aligned_free(pRightBlockL3Pool);
+			return result;
+		} // if constexpr mat, mat
+		return mat(0, 0, nullptr);
+	}
+
+	rowVec operator[](int loc) const { // note: just provide a convenient path to get element by coordinations, no performance takes into account...
+		if (loc >= rows) {
+			std::stringstream message;
+			message << "operator[]row Error loc: " << loc << " rows: " << rows << '\n';
+			std::cerr << message.str();
+			throw std::runtime_error(message.str());
+		}
+		NumType* data = static_cast<NumType*>(_aligned_malloc(sizeof(NumType) * cols, 32));
+		memcpy(data, pData + loc * cols, sizeof(NumType) * cols);
+		return { cols, data };
+	}
+
+	////////////////////////////////////////////
+
+	// /* tools ////////////////////////////////
+public:
+	void print() const {
+		for (int i = 0; i < rows; ++i) {
+			for (int j = 0; j < cols; ++j) {
+				printf("%.2f ", pData[i * cols + j]);
+			}
+			std::cout << '\n';
+		}
+	}
+	////////////////////////////////////////////
+};

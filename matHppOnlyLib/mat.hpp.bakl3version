@@ -1,0 +1,758 @@
+﻿// mat.hpp just one header
+// for daily use
+
+/* L2 pack, then rearrange
+ * mem layout to fit l1 and kernel
+ */
+
+#include <iostream>
+#include <sstream>
+#include <cstring>
+#include <random>
+#include <chrono>
+#include <algorithm>
+#include <unordered_map>
+
+#include <omp.h>
+#include <immintrin.h>
+
+#pragma once
+
+#ifndef MAT_THREAD_NUMS
+#define MAT_THREAD_NUMS 8
+#endif
+
+template <typename NumType>
+class mat;
+
+// /* 模板特化 不同类型对应不同分块 /////
+template<typename T> struct NumTypeToN;
+template <>
+struct NumTypeToN<float> {
+
+	static constexpr int L3X = 511; // 512
+	static constexpr int L3Y = 768; // 768
+	static constexpr int L3Z = 768; // 768
+	static constexpr int L3LEFTSIZE = L3Y * L3X;
+	static constexpr int L3RIGHTSIZE = L3X * L3Z;
+
+	static constexpr int L2X = 256; // 256
+	static constexpr int L2Y = 144; // 144
+	static constexpr int L2Z = 144; // 144
+	static constexpr int L2LEFTSIZE = L2Y * L2X;
+	static constexpr int L2RIGHTSIZE = L2X * L2Z;
+	static constexpr int L2RESULTSIZE = L2Y * L2Z;
+
+	static constexpr int L1X = L2X; // 256 注意这个最好和 L2X 相等, 否则 kernel 就不能用 setzero
+	static constexpr int L1Y = 6; // 6 
+	static constexpr int L1Z = 8; // 8
+};
+template <>
+struct NumTypeToN<double> {
+	static constexpr int L2X = 512;
+	static constexpr int L2Y = 512;
+	static constexpr int L2Z = 512;
+	static constexpr int L2LEFTSIZE = L2Y * L2X;
+	static constexpr int L2RIGHTSIZE = L2X * L2Z;
+
+
+	static constexpr int L1X = 256;
+	static constexpr int L1Z = 8; // 这个要改
+	static constexpr int L1Y = 4;
+	static constexpr int L1LEFTSIZE = L1Y * L2X;
+	static constexpr int L1RIGHTSIZE = L2X * L1Z;
+};
+////////////////////
+// /* 模板偏特化 类型提取 /////
+template<typename T> struct InNumTypeOf;
+//////////////////////
+// /* mat operator * 用 /////
+template<typename U>
+struct InNumTypeOf<mat<U>> {
+	using type = U;
+};
+///////////////////////////////
+
+template <typename NumType>
+class mat {
+
+public:
+	// /* 行向量  /////
+	class rowVec;
+	///////////////////
+public:
+	class rowVec {
+		// /* rowVec 结构体 /////////////////
+	public:
+		int cols;
+		NumType* pData;
+		//////////////////////////////
+		// /* constructors ///////////
+	public:
+		rowVec() = delete;
+		rowVec(const rowVec& inVec) :
+			cols(inVec.cols), pData(new NumType[cols]) {
+			for (int i = 0; i < cols; ++i) {
+				pData[i] = inVec.pData[i];
+			}
+		}
+		rowVec(rowVec&& inVec) :
+			cols(inVec.cols), pData(inVec.pData) {
+			inVec.pData = nullptr;
+			inVec.cols = 0;
+		}
+	private:
+		rowVec(int inCols, NumType* inpData) : cols(inCols), pData(inpData) {}
+	public:
+		~rowVec() {
+			if (pData != nullptr) {
+				delete[] pData;
+			}
+			cols = 0;
+		}
+		////////////////////////////////////
+		// /* rowVec operator 重载 //////////
+	public:
+		rowVec& operator=(const rowVec& inVec) {
+			if (pData != nullptr &&
+				pData != inVec.pData) {
+				delete[] pData;
+			}
+			pData = new NumType[inVec.cols];
+			cols = inVec.cols;
+			for (int i = 0; i < cols; ++i) {
+				pData[i] = inVec.pData[i];
+			}
+			return *this;
+		}
+		rowVec& operator=(rowVec&& inVec) {
+			if (pData != nullptr &&
+				pData != inVec.pData) {
+				delete[] pData;
+			}
+			pData = inVec.pData;
+			cols = inVec.cols;
+			inVec.pData = nullptr;
+			inVec.cols = 0;
+			return *this;
+		}
+		NumType operator[](int loc) const {
+			if (loc >= cols) {
+				std::stringstream message;
+				message << "oneVec[]col Error: "
+					<< "loc: " << loc
+					<< " cols: " << cols << '\n';
+				std::cerr << message.str();
+				throw std::runtime_error(message.str());
+			}
+			return pData[loc];
+		}
+		operator mat() {
+			NumType* data = new NumType[cols];
+			memcpy(data, pData, sizeof(NumType) * cols);
+			return mat<NumType>(1, cols, data);
+		}
+		//////////////////////////////
+		// /* who is your true friend ? /////
+		friend mat;
+		/////////////////////////////////////
+	};
+
+	// /* mat 结构体 ///////////////////
+public:
+	int rows;
+	int cols;
+	int len;
+	NumType* pData;
+	//////////////////////////////
+
+	// /* mat constructors //////////////////////////
+private:
+	// for later operator *
+	mat(int inRows, int inCols, NumType* inpData) :
+		rows(inRows), cols(inCols), len(inRows* inCols),
+		pData(inpData) {}
+public:
+	mat() = delete;
+	mat(int inRows, int inCols) :
+		rows(inRows), cols(inCols), len(inRows* inCols),
+		pData(new NumType[len]) {}
+	mat(int inRows, int inCols, NumType element) :
+		rows(inRows), cols(inCols), len(inRows* inCols),
+		pData(new NumType[len]) {
+		for (int i = 0; i < len; ++i) {
+			pData[i] = element;
+		}
+	}
+	template <typename RandomType>
+	mat(int inRows, int inCols, RandomType& inDis) :
+		rows(inRows), cols(inCols), len(inRows* inCols), pData(new NumType[len]) {
+		std::random_device device;
+		std::mt19937 gen(device());
+		for (int i = 0; i < len; ++i) {
+			pData[i] = inDis(gen);
+		}
+	}
+	// /* xvalue you know. /////
+	mat(const mat& inM) :
+		rows(inM.rows), cols(inM.cols), len(inM.len),
+		pData(new NumType[len]) {
+		memcpy(pData, inM.pData, sizeof(NumType) * len);
+	}
+	mat(mat&& inM) noexcept :
+		rows(inM.rows), cols(inM.cols), len(inM.len),
+		pData(inM.pData) {
+		inM.pData = nullptr;
+		inM.rows = 0; inM.cols = 0; inM.len = 0;
+	}
+	~mat() {
+		if (pData != nullptr) {
+			delete[] pData;
+		}
+		rows = 0; cols = 0; len = 0;
+	}
+	/////////////////////////////////////////////
+
+	// /* mat operator overwrite ////////////////////
+public:
+	mat& operator=(const mat& inM) {
+		rows = inM.rows;
+		cols = inM.cols;
+		len = inM.len;
+		if (pData != nullptr &&
+			pData != inM.pData) {
+			delete[] pData;
+		}
+
+		pData = new NumType[len];
+		for (int i = 0; i < len; ++i) {
+			pData[i] = inM.pData[i];
+		}
+		return *this;
+	}
+
+	mat& operator=(mat&& inM) {
+		rows = inM.rows;
+		cols = inM.cols;
+		len = inM.len;
+		if (pData != nullptr &&
+			pData != inM.pData) {
+			delete[] pData;
+		}
+		pData = inM.pData;
+		inM.pData = nullptr;
+		return *this;
+	}
+
+	template <typename InTypeLeft, typename InTypeRight>
+	friend mat operator+(const InTypeLeft& left, const InTypeRight& right) {
+		if constexpr (std::is_arithmetic_v<InTypeLeft> &&
+			std::is_same_v<InTypeRight, mat>) {
+			mat result = right;
+			for (int i = 0; i < result.len; ++i) {
+				result.pData[i] += left;
+			}
+			return result;
+		}
+		if constexpr (std::is_same_v<InTypeLeft, mat> &&
+			std::is_arithmetic_v<InTypeRight>) {
+			mat result = left;
+			for (int i = 0; i < result.len; ++i) {
+				result.pData[i] += right;
+			}
+			return result;
+		}
+		if constexpr (std::is_same_v<InTypeLeft, mat> &&
+			std::is_same_v<InTypeRight, mat>) {
+			if (left.rows != right.rows &&
+				left.cols != right.cols) {
+				std::stringstream message;
+				message << "left-rows: "
+					<< left.rows << " "
+					<< "right-rows: " << right.rows << " "
+					<< "left-cols: " << left.cols << " "
+					<< "right-cols: " << right.cols << '\n';
+				std::cerr << "operator+ Error: " << message.str();
+				throw std::runtime_error("");
+			}
+			mat result(left.rows, right.cols);
+			for (int i = 0; i < result.len; ++i) {
+				result.pData[i] = left.pData[i] + right.pData[i];
+			}
+			return result;
+		}
+		return mat(0, 0, nullptr);
+	}
+
+	template <typename InTypeLeft, typename InTypeRight>
+	friend mat operator-(const InTypeLeft& left, const InTypeRight& right) {
+		if constexpr (std::is_arithmetic_v<InTypeLeft> &&
+			std::is_same_v<InTypeRight, mat>) {
+			mat result = right;
+			for (int i = 0; i < result.len; ++i) {
+				result.pData[i] -= left;
+			}
+			return result;
+		}
+		if constexpr (std::is_same_v<InTypeLeft, mat> &&
+			std::is_arithmetic_v<InTypeRight>) {
+			mat result = left;
+			for (int i = 0; i < result.len; ++i) {
+				result.pData[i] -= right;
+			}
+			return result;
+		}
+		if constexpr (std::is_same_v<InTypeLeft, mat> &&
+			std::is_same_v<InTypeRight, mat>) {
+			if (left.rows != right.rows &&
+				left.cols != right.cols) {
+				std::stringstream message;
+				message << "left-rows: "
+					<< left.rows << " "
+					<< "right-rows: " << right.rows << " "
+					<< "left-cols: " << left.cols << " "
+					<< "right-cols: " << right.cols << '\n';
+				std::cerr << "operator+ Error: " << message.str();
+				throw std::runtime_error("");
+			}
+			mat result(left.rows, right.cols);
+			for (int i = 0; i < result.len; ++i) {
+				result.pData[i] = left.pData[i] - right.pData[i];
+			}
+			return result;
+		}
+		return mat(0, 0, nullptr);
+	}
+
+public:
+	template <typename InLeftType, typename InRightType>
+	friend mat operator*(const InLeftType& left, const InRightType& right) {
+		if constexpr (std::is_same_v<InLeftType, mat> &&
+			std::is_arithmetic_v<InRightType>) {
+			mat result = left;
+			for (int i = 0; i < left.len; ++i) {
+				result.pData[i] *= right;
+			}
+			return result;
+		}
+		if constexpr (std::is_arithmetic_v<InLeftType> &&
+			std::is_same_v<InRightType, mat>) {
+			mat result = right;
+			for (int i = 0; i < right.len; ++i) {
+				result.pData[i] *= left;
+			}
+			return result;
+		}
+		if constexpr (std::is_same_v<mat, InLeftType > &&
+			std::is_same_v<mat, InRightType>) {
+
+			// 提取类型 InNumType
+			using InNumType = typename InNumTypeOf<InLeftType>::type;
+
+			if constexpr (!std::is_same_v<InNumType, double> && !std::is_same_v<InNumType, float>) {
+				std::stringstream message;
+				message << "when mat * mat, <> should be double or float\n";
+				std::cerr << message.str();
+				throw std::runtime_error(message.str());
+			}
+
+			const int& p = left.rows, & q = left.cols,
+				& r = right.rows, & s = right.cols;
+			if (q != r) {
+				std::stringstream message;
+				message << "mat * Error: q: " << q << " r: " << r << '\n';
+				std::cerr << message.str();
+				throw std::runtime_error(message.str());
+			}
+
+			// 目前来看, 还要加速, 只有一种办法: 就是非常激进的内存布局处理, 1. 内存对齐 2. 内存池和线程池
+			// 可能把 L2 with L1 memlayout 的 layout 改为完全适配 kernel 的形状会好一些, 但是之前尝试过, 似乎没有效果,,,
+
+			mat<InNumType> result(p, s, 0.);
+
+			// 要做一个 l3 的 cache, 在线程外
+			InNumType* pLeftBlockL3 = new InNumType[NumTypeToN<InNumType>::L3LEFTSIZE];
+			mat<InNumType> leftBlockL3(0, 0, pLeftBlockL3);
+
+			InNumType* pRightBlockL3 = new InNumType[NumTypeToN<InNumType>::L3RIGHTSIZE];
+			mat<InNumType> rightBlockL3(0, 0, pRightBlockL3);
+
+			// 大内存块, 线程用指针引用
+			InNumType* pLeftBlockL2Big = new InNumType[NumTypeToN<InNumType>::L2LEFTSIZE * MAT_THREAD_NUMS];
+			InNumType* pRightBlockL2Big = new InNumType[NumTypeToN<InNumType>::L2RIGHTSIZE * MAT_THREAD_NUMS];
+			InNumType* pResultBlockL2Big = new InNumType[NumTypeToN<InNumType>::L2RESULTSIZE * MAT_THREAD_NUMS];
+
+			for (int i = 0; i < NumTypeToN<InNumType>::L2RESULTSIZE * MAT_THREAD_NUMS; ++i) {
+				pResultBlockL2Big[i] = 0.;
+			}
+
+			// 多线程跳行用的
+			std::unordered_map<int, int> leftBlockL2JumpNextRow;
+
+			for (int i = 0; i < p; i += NumTypeToN<InNumType>::L3Y) {
+				leftBlockL3.rows = NumTypeToN<InNumType>::L3Y > p - i ? p - i : NumTypeToN<InNumType>::L3Y;
+				for (int k = 0; k < q; k += NumTypeToN<InNumType>::L3X) {
+					leftBlockL3.cols = NumTypeToN<InNumType>::L3X > q - k ? q - k : NumTypeToN<InNumType>::L3X;
+					leftBlockL3.len = leftBlockL3.rows * leftBlockL3.cols;
+
+					int tmpLeftBlockL2rows = 0;
+					int tmpLeftBlockL2cols = 0;
+					int tmpLeftBlockL2len = 0;
+					// 清零
+					leftBlockL2JumpNextRow.clear();
+					// reArrange left -> L3 with L2 memlayout
+					for (int ii = 0; ii < leftBlockL3.rows; ii += NumTypeToN<InNumType>::L2Y) {
+						leftBlockL2JumpNextRow[ii] = tmpLeftBlockL2len;
+
+						tmpLeftBlockL2rows =
+							NumTypeToN<InNumType>::L2Y > leftBlockL3.rows - ii ? leftBlockL3.rows - ii : NumTypeToN<InNumType>::L2Y;
+						for (int kk = 0; kk < leftBlockL3.cols; kk += NumTypeToN<InNumType>::L2X) {
+							tmpLeftBlockL2cols =
+								NumTypeToN<InNumType>::L2X > leftBlockL3.cols - kk ? leftBlockL3.cols - kk : NumTypeToN<InNumType>::L2X;
+							for (int iii = 0; iii < tmpLeftBlockL2rows; ++iii) {
+								memcpy(leftBlockL3.pData + iii * tmpLeftBlockL2cols + tmpLeftBlockL2len,
+									left.pData + (i + ii + iii) * q + k + kk, sizeof(InNumType) * tmpLeftBlockL2cols);
+							}
+							tmpLeftBlockL2len += tmpLeftBlockL2rows * tmpLeftBlockL2cols;
+						}
+					}
+					rightBlockL3.rows = leftBlockL3.cols;
+					for (int j = 0; j < s; j += NumTypeToN<InNumType>::L3Z) {
+						rightBlockL3.cols = NumTypeToN<InNumType>::L3Z > s - j ? s - j : NumTypeToN<InNumType>::L3Z;
+						rightBlockL3.len = rightBlockL3.rows * rightBlockL3.cols;
+
+						int tmpRightBlockL2rows = 0;
+						int tmpRightBlockL2cols = 0;
+						int tmpRightBlockL2len = 0;
+						// reArrange right -> L3 with L2 memlayout
+						for (int kk = 0; kk < rightBlockL3.rows; kk += NumTypeToN<InNumType>::L2X) {
+							tmpRightBlockL2rows =
+								NumTypeToN<InNumType>::L2X > rightBlockL3.rows - kk ? rightBlockL3.rows - kk : NumTypeToN<InNumType>::L2X;
+							for (int jj = 0; jj < rightBlockL3.cols; jj += NumTypeToN<InNumType>::L2Z) {
+								tmpRightBlockL2cols =
+									NumTypeToN<InNumType>::L2Z > rightBlockL3.cols - jj ? rightBlockL3.cols - jj : NumTypeToN<InNumType>::L2Z;
+
+								for (int kkk = 0; kkk < tmpRightBlockL2rows; ++kkk) {
+									memcpy(rightBlockL3.pData + kkk * tmpRightBlockL2cols + tmpRightBlockL2len,
+										right.pData + (k + kk + kkk) * s + j + jj, sizeof(InNumType) * tmpRightBlockL2cols);
+								}
+								tmpRightBlockL2len += tmpRightBlockL2rows * tmpRightBlockL2cols;
+							}
+						}
+
+						// 按照 L2Y stride 开启并行, 左右乘法结果要写回各个线程的 resultBlockL2, 所以改为 ijk 才能避免反复读写
+						// 上面的内存布局变化应该是 jj -> kk 竖着读.
+						/*
+						 *              for kk ---->
+						 *   L2Y leftL2 thread0 [ L2X ]    for   L2X rightL2 thread0 [ L2Z ]
+						 *   L2Y leftL2 thread0 [ L2X ]     kk   L2X rightL2 thread0 [ L2Z ]
+						 *         .                        |             .
+						 *         .                        |             .
+						 *         .                        |             .
+						 *   L2Y leftL2 thread1 [ L2X ]     |    L2X rightL2 thread1 [ L2Z ]
+						 *         .                        v             .
+						 *         .                                      .
+						 *         .                                      .
+						 *    每个线程单独有一个 L1 级别的 kernel 得到结果. 写入各自线程的 resultBlockL2
+						 */
+#pragma omp parallel num_threads(MAT_THREAD_NUMS) if (p > 500 && q > 500 && s > 500)
+						{
+							// 考虑用大内存块, 然后根据线程数偏移引用
+							int threadID = omp_get_thread_num();
+							//int threadID = 0;
+							InNumType* pLeftBlockL2 = pLeftBlockL2Big + threadID * NumTypeToN<InNumType>::L2LEFTSIZE;
+							mat leftBlockL2(0, 0, pLeftBlockL2);
+							InNumType* pRightBlockL2 = pRightBlockL2Big + threadID * NumTypeToN<InNumType>::L2RIGHTSIZE;
+							mat rightBlockL2(0, 0, pRightBlockL2);
+							InNumType* pResultBlockL2 = pResultBlockL2Big + threadID * NumTypeToN<InNumType>::L2RESULTSIZE;
+							mat resultBlockL2(0, 0, pResultBlockL2);
+
+#pragma omp for
+							for (int ii = 0; ii < leftBlockL3.rows; ii += NumTypeToN<InNumType>::L2Y) {
+								leftBlockL2.rows =
+									NumTypeToN<InNumType>::L2Y > leftBlockL3.rows - ii ? leftBlockL3.rows - ii : NumTypeToN<InNumType>::L2Y;
+
+								// ii 变换, 加一行的偏移 leftBlockL2 换一行 (于 leftBlockL3 中)
+								leftBlockL2.len = leftBlockL2JumpNextRow[ii];
+								int leftBlockL2LenAlter = 0; // 初始化沿着 kk 的偏移
+
+								// 清零
+								rightBlockL2.len = 0;
+								leftBlockL2LenAlter = 0;
+
+								for (int kk = 0; kk < leftBlockL3.cols; kk += NumTypeToN<InNumType>::L2X) {
+									leftBlockL2.cols =
+										NumTypeToN<InNumType>::L2X > leftBlockL3.cols - kk ? leftBlockL3.cols - kk : NumTypeToN<InNumType>::L2X;
+									rightBlockL2.rows = leftBlockL2.cols;
+
+									int tmpLeftBlockL1Rows = 0;
+									int tmpLeftBlockL1Cols = 0;
+									int tmpLeftBlockL1Len = 0;
+
+									// leftBlockL3 with L2 memlayout -> leftBlockL2 with L1 memlayout
+									for (int iii = 0; iii < leftBlockL2.rows; iii += NumTypeToN<InNumType>::L1Y) {
+										tmpLeftBlockL1Rows =
+											NumTypeToN<InNumType>::L1Y > leftBlockL2.rows - iii ? leftBlockL2.rows - iii : NumTypeToN<InNumType>::L1Y;
+										for (int kkk = 0; kkk < leftBlockL2.cols; kkk += NumTypeToN<InNumType>::L1X) {
+											tmpLeftBlockL1Cols =
+												NumTypeToN<InNumType>::L1X > leftBlockL2.cols - kkk ? leftBlockL2.cols - kkk : NumTypeToN<InNumType>::L1X;
+											for (int iiii = 0; iiii < tmpLeftBlockL1Rows; ++iiii) {
+												memcpy(leftBlockL2.pData + iiii * tmpLeftBlockL1Cols + tmpLeftBlockL1Len,
+													leftBlockL3.pData + (iii + iiii) * leftBlockL2.cols + kkk + (leftBlockL2.len + leftBlockL2LenAlter),
+													sizeof(InNumType) * tmpLeftBlockL1Cols);
+											}
+
+											tmpLeftBlockL1Len += tmpLeftBlockL1Rows * tmpLeftBlockL1Cols;
+										}
+									}
+									leftBlockL2LenAlter += leftBlockL2.rows * leftBlockL2.cols;
+
+									for (int jj = 0; jj < rightBlockL3.cols; jj += NumTypeToN<InNumType>::L2Z) {
+
+										rightBlockL2.cols =
+											NumTypeToN<InNumType>::L2Z > rightBlockL3.cols - jj ? rightBlockL3.cols - jj : NumTypeToN<InNumType>::L2Z;
+
+										// rightBlockL3 with L2 memlayout -> rightBlockL2 with L1 memlayout
+										int tmpRightBlockL1Rows = 0;
+										int tmpRightBlockL1Cols = 0;
+										int tmpRightBlockL1Len = 0;
+
+										// kkk -> jjj 循环顺序 this is much faster
+										for (int kkk = 0; kkk < rightBlockL2.rows; kkk += NumTypeToN<InNumType>::L1X) {
+											tmpRightBlockL1Rows =
+												NumTypeToN<InNumType>::L1X > rightBlockL2.rows - kkk ? rightBlockL2.rows - kkk : NumTypeToN<InNumType>::L1X;
+											for (int jjj = 0; jjj < rightBlockL2.cols; jjj += NumTypeToN<InNumType>::L1Z) {
+												tmpRightBlockL1Cols =
+													NumTypeToN<InNumType>::L1Z > rightBlockL2.cols - jjj ? rightBlockL2.cols - jjj : NumTypeToN<InNumType>::L1Z;
+
+												for (int kkkk = 0; kkkk < tmpRightBlockL1Rows; ++kkkk) {
+													memcpy(rightBlockL2.pData + kkkk * tmpRightBlockL1Cols + tmpRightBlockL1Len,
+														rightBlockL3.pData + (kkk + kkkk) * rightBlockL2.cols + jjj + rightBlockL2.len, sizeof(InNumType) * tmpRightBlockL1Cols);
+												}
+												tmpRightBlockL1Len += tmpRightBlockL1Rows * tmpRightBlockL1Cols;
+											}
+										}
+										rightBlockL2.len += rightBlockL2.rows * rightBlockL2.cols;
+
+										// now the true computation: leftBlockL2 * rightBlockL2 = resultBlockL2
+										tmpLeftBlockL1Len = 0;
+										for (int iii = 0; iii < leftBlockL2.rows; iii += NumTypeToN<InNumType>::L1Y) {
+
+											tmpLeftBlockL1Rows =
+												NumTypeToN<InNumType>::L1Y > leftBlockL2.rows - iii ? leftBlockL2.rows - iii : NumTypeToN<InNumType>::L1Y;
+
+											tmpRightBlockL1Len = 0;
+											for (int kkk = 0; kkk < leftBlockL2.cols; kkk += NumTypeToN<InNumType>::L1X) {
+												tmpLeftBlockL1Cols =
+													NumTypeToN<InNumType>::L1X > leftBlockL2.cols - kkk ? leftBlockL2.cols - kkk : NumTypeToN<InNumType>::L1X;
+												tmpRightBlockL1Rows = tmpLeftBlockL1Cols;
+
+												for (int jjj = 0; jjj < rightBlockL2.cols; jjj += NumTypeToN<InNumType>::L1Z) {
+													tmpRightBlockL1Cols =
+														NumTypeToN<InNumType>::L1Z > rightBlockL2.cols - jjj ? rightBlockL2.cols - jjj : NumTypeToN<InNumType>::L1Z;
+
+													resultBlockL2.rows = leftBlockL2.rows;
+													resultBlockL2.cols = rightBlockL2.cols;
+
+													// kernel 需要根据 InNumType 改内核的尺寸, float 和 double ymm 存的数量不一样...
+													if (tmpLeftBlockL1Rows == NumTypeToN<InNumType>::L1Y && tmpRightBlockL1Cols == NumTypeToN<InNumType>::L1Z) {
+														__m256 ymm0 = _mm256_setzero_ps();
+														__m256 ymm1 = _mm256_setzero_ps();
+														__m256 ymm2 = _mm256_setzero_ps();
+														__m256 ymm3 = _mm256_setzero_ps();
+														__m256 ymm4 = _mm256_setzero_ps();
+														__m256 ymm5 = _mm256_setzero_ps();
+														// 这里关于 kkkk, 做 unroll 用满 16 个寄存器可能会好些
+														int kkkk = 0;
+														for (; kkkk + 3 < tmpLeftBlockL1Cols; kkkk += 4) {
+
+															// 虽然说 set1 和 broadcast 在 gcc O3 下速度一样, 但是 msvc 会差一倍, 所以这里用 set1
+															__m256 ymm6 = _mm256_set1_ps(leftBlockL2.pData[kkkk + tmpLeftBlockL1Len]);
+															__m256 ymm7 = _mm256_set1_ps(leftBlockL2.pData[tmpLeftBlockL1Cols + kkkk + tmpLeftBlockL1Len]);
+															__m256 ymm8 = _mm256_set1_ps(leftBlockL2.pData[2 * tmpLeftBlockL1Cols + kkkk + tmpLeftBlockL1Len]);
+															__m256 ymm9 = _mm256_set1_ps(leftBlockL2.pData[3 * tmpLeftBlockL1Cols + kkkk + tmpLeftBlockL1Len]);
+															__m256 ymm10 = _mm256_set1_ps(leftBlockL2.pData[4 * tmpLeftBlockL1Cols + kkkk + tmpLeftBlockL1Len]);
+															__m256 ymm11 = _mm256_set1_ps(leftBlockL2.pData[5 * tmpLeftBlockL1Cols + kkkk + tmpLeftBlockL1Len]);
+
+															__m256 ymm12 = _mm256_loadu_ps(&rightBlockL2.pData[kkkk * NumTypeToN<InNumType>::L1Z + tmpRightBlockL1Len]);
+															__m256 ymm13 = _mm256_loadu_ps(&rightBlockL2.pData[(kkkk + 1) * NumTypeToN<InNumType>::L1Z + tmpRightBlockL1Len]);
+															__m256 ymm14 = _mm256_loadu_ps(&rightBlockL2.pData[(kkkk + 2) * NumTypeToN<InNumType>::L1Z + tmpRightBlockL1Len]);
+															__m256 ymm15 = _mm256_loadu_ps(&rightBlockL2.pData[(kkkk + 3) * NumTypeToN<InNumType>::L1Z + tmpRightBlockL1Len]);
+
+															ymm0 = _mm256_fmadd_ps(ymm6, ymm12, ymm0);
+															ymm6 = _mm256_set1_ps(leftBlockL2.pData[kkkk + 1 + tmpLeftBlockL1Len]);
+
+															ymm1 = _mm256_fmadd_ps(ymm7, ymm12, ymm1);
+															ymm7 = _mm256_set1_ps(leftBlockL2.pData[tmpLeftBlockL1Cols + kkkk + 1 + tmpLeftBlockL1Len]);
+
+															ymm2 = _mm256_fmadd_ps(ymm8, ymm12, ymm2);
+															ymm8 = _mm256_set1_ps(leftBlockL2.pData[2 * tmpLeftBlockL1Cols + kkkk + 1 + tmpLeftBlockL1Len]);
+
+															ymm3 = _mm256_fmadd_ps(ymm9, ymm12, ymm3);
+															ymm9 = _mm256_set1_ps(leftBlockL2.pData[3 * tmpLeftBlockL1Cols + kkkk + 1 + tmpLeftBlockL1Len]);
+
+															ymm4 = _mm256_fmadd_ps(ymm10, ymm12, ymm4);
+															ymm10 = _mm256_set1_ps(leftBlockL2.pData[4 * tmpLeftBlockL1Cols + kkkk + 1 + tmpLeftBlockL1Len]);
+
+															ymm5 = _mm256_fmadd_ps(ymm11, ymm12, ymm5);
+															ymm11 = _mm256_set1_ps(leftBlockL2.pData[5 * tmpLeftBlockL1Cols + kkkk + 1 + tmpLeftBlockL1Len]);
+
+															ymm0 = _mm256_fmadd_ps(ymm6, ymm13, ymm0);
+															ymm6 = _mm256_set1_ps(leftBlockL2.pData[kkkk + 2 + tmpLeftBlockL1Len]);
+
+															ymm1 = _mm256_fmadd_ps(ymm7, ymm13, ymm1);
+															ymm7 = _mm256_set1_ps(leftBlockL2.pData[tmpLeftBlockL1Cols + kkkk + 2 + tmpLeftBlockL1Len]);
+
+															ymm2 = _mm256_fmadd_ps(ymm8, ymm13, ymm2);
+															ymm8 = _mm256_set1_ps(leftBlockL2.pData[2 * tmpLeftBlockL1Cols + kkkk + 2 + tmpLeftBlockL1Len]);
+
+															ymm3 = _mm256_fmadd_ps(ymm9, ymm13, ymm3);
+															ymm9 = _mm256_set1_ps(leftBlockL2.pData[3 * tmpLeftBlockL1Cols + kkkk + 2 + tmpLeftBlockL1Len]);
+
+															ymm4 = _mm256_fmadd_ps(ymm10, ymm13, ymm4);
+															ymm10 = _mm256_set1_ps(leftBlockL2.pData[4 * tmpLeftBlockL1Cols + kkkk + 2 + tmpLeftBlockL1Len]);
+
+															ymm5 = _mm256_fmadd_ps(ymm11, ymm13, ymm5);
+															ymm11 = _mm256_set1_ps(leftBlockL2.pData[5 * tmpLeftBlockL1Cols + kkkk + 2 + tmpLeftBlockL1Len]);
+
+															ymm0 = _mm256_fmadd_ps(ymm6, ymm14, ymm0);
+															ymm6 = _mm256_set1_ps(leftBlockL2.pData[kkkk + 3 + tmpLeftBlockL1Len]);
+
+															ymm1 = _mm256_fmadd_ps(ymm7, ymm14, ymm1);
+															ymm7 = _mm256_set1_ps(leftBlockL2.pData[tmpLeftBlockL1Cols + kkkk + 3 + tmpLeftBlockL1Len]);
+
+															ymm2 = _mm256_fmadd_ps(ymm8, ymm14, ymm2);
+															ymm8 = _mm256_set1_ps(leftBlockL2.pData[2 * tmpLeftBlockL1Cols + kkkk + 3 + tmpLeftBlockL1Len]);
+
+															ymm3 = _mm256_fmadd_ps(ymm9, ymm14, ymm3);
+															ymm9 = _mm256_set1_ps(leftBlockL2.pData[3 * tmpLeftBlockL1Cols + kkkk + 3 + tmpLeftBlockL1Len]);
+
+															ymm4 = _mm256_fmadd_ps(ymm10, ymm14, ymm4);
+															ymm10 = _mm256_set1_ps(leftBlockL2.pData[4 * tmpLeftBlockL1Cols + kkkk + 3 + tmpLeftBlockL1Len]);
+
+															ymm5 = _mm256_fmadd_ps(ymm11, ymm14, ymm5);
+															ymm11 = _mm256_set1_ps(leftBlockL2.pData[5 * tmpLeftBlockL1Cols + kkkk + 3 + tmpLeftBlockL1Len]);
+
+															ymm0 = _mm256_fmadd_ps(ymm6, ymm15, ymm0);
+															ymm1 = _mm256_fmadd_ps(ymm7, ymm15, ymm1);
+															ymm2 = _mm256_fmadd_ps(ymm8, ymm15, ymm2);
+															ymm3 = _mm256_fmadd_ps(ymm9, ymm15, ymm3);
+															ymm4 = _mm256_fmadd_ps(ymm10, ymm15, ymm4);
+															ymm5 = _mm256_fmadd_ps(ymm11, ymm15, ymm5);
+														}
+
+														for (; kkkk < tmpLeftBlockL1Cols; ++kkkk) {
+
+															__m256 ymm6 = _mm256_set1_ps(leftBlockL2.pData[kkkk + tmpLeftBlockL1Len]);
+															__m256 ymm7 = _mm256_set1_ps(leftBlockL2.pData[tmpLeftBlockL1Cols + kkkk + tmpLeftBlockL1Len]);
+															__m256 ymm8 = _mm256_set1_ps(leftBlockL2.pData[2 * tmpLeftBlockL1Cols + kkkk + tmpLeftBlockL1Len]);
+															__m256 ymm9 = _mm256_set1_ps(leftBlockL2.pData[3 * tmpLeftBlockL1Cols + kkkk + tmpLeftBlockL1Len]);
+															__m256 ymm10 = _mm256_set1_ps(leftBlockL2.pData[4 * tmpLeftBlockL1Cols + kkkk + tmpLeftBlockL1Len]);
+															__m256 ymm11 = _mm256_set1_ps(leftBlockL2.pData[5 * tmpLeftBlockL1Cols + kkkk + tmpLeftBlockL1Len]);
+
+															__m256 ymm12 = _mm256_loadu_ps(&rightBlockL2.pData[kkkk * NumTypeToN<InNumType>::L1Z + tmpRightBlockL1Len]);
+
+															ymm0 = _mm256_fmadd_ps(ymm6, ymm12, ymm0);
+															ymm1 = _mm256_fmadd_ps(ymm7, ymm12, ymm1);
+															ymm2 = _mm256_fmadd_ps(ymm8, ymm12, ymm2);
+															ymm3 = _mm256_fmadd_ps(ymm9, ymm12, ymm3);
+															ymm4 = _mm256_fmadd_ps(ymm10, ymm12, ymm4);
+															ymm5 = _mm256_fmadd_ps(ymm11, ymm12, ymm5);
+														}
+
+														_mm256_storeu_ps(&resultBlockL2.pData[iii * resultBlockL2.cols + jjj], ymm0);
+														_mm256_storeu_ps(&resultBlockL2.pData[(iii + 1) * resultBlockL2.cols + jjj], ymm1);
+														_mm256_storeu_ps(&resultBlockL2.pData[(iii + 2) * resultBlockL2.cols + jjj], ymm2);
+														_mm256_storeu_ps(&resultBlockL2.pData[(iii + 3) * resultBlockL2.cols + jjj], ymm3);
+														_mm256_storeu_ps(&resultBlockL2.pData[(iii + 4) * resultBlockL2.cols + jjj], ymm4);
+														_mm256_storeu_ps(&resultBlockL2.pData[(iii + 5) * resultBlockL2.cols + jjj], ymm5);
+													}
+													else {
+														for (int iiii = 0; iiii < tmpLeftBlockL1Rows; ++iiii) {
+															// 这里可以用下 simd
+															for (int kkkk = 0; kkkk < tmpLeftBlockL1Cols; ++kkkk) {
+																for (int jjjj = 0; jjjj < tmpRightBlockL1Cols; ++jjjj) {
+																	resultBlockL2.pData[(iii + iiii) * resultBlockL2.cols + jjj + jjjj] +=
+																		leftBlockL2.pData[iiii * tmpLeftBlockL1Cols + kkkk + tmpLeftBlockL1Len] *
+																		rightBlockL2.pData[kkkk * tmpRightBlockL1Cols + jjjj + tmpRightBlockL1Len];
+																}
+															}
+														}
+													}
+													tmpRightBlockL1Len += tmpRightBlockL1Rows * tmpRightBlockL1Cols;
+
+
+													// 写回 result
+													for (int iiii = 0; iiii < tmpLeftBlockL1Rows; ++iiii) {
+
+														if (tmpRightBlockL1Cols == NumTypeToN<InNumType>::L1Z) {
+															__m256 ymm0 = _mm256_loadu_ps(&result.pData[(i + ii + iii + iiii) * s + j + jj + jjj]);
+															__m256 ymm1 = _mm256_loadu_ps(&resultBlockL2.pData[(iii + iiii) * resultBlockL2.cols + jjj]);
+															ymm0 = _mm256_add_ps(ymm1, ymm0);
+
+															_mm256_storeu_ps(&result.pData[(i + ii + iii + iiii) * s + j + jj + jjj], ymm0);
+
+															__m256 ymm2 = _mm256_setzero_ps();
+															_mm256_storeu_ps(&resultBlockL2.pData[(iii + iiii) * resultBlockL2.cols + jjj], ymm2);
+														}
+														else {
+															for (int jjjj = 0; jjjj < tmpRightBlockL1Cols; ++jjjj) {
+																result.pData[(i + ii + iii + iiii) * s + j + jj + jjj + jjjj] +=
+																	resultBlockL2.pData[(iii + iiii) * resultBlockL2.cols + jjj + jjjj];
+																resultBlockL2.pData[(iii + iiii) * resultBlockL2.cols + jjj + jjjj] = 0.;
+															}
+														}
+													}
+												} // jjj
+												tmpLeftBlockL1Len += tmpLeftBlockL1Rows * tmpLeftBlockL1Cols;
+											} // kkk
+										} // iii
+
+									} // jj
+								} // kk
+							} // ii
+
+
+							// 避免下次循环 big 内存池被析构
+							leftBlockL2.pData = nullptr;
+							rightBlockL2.pData = nullptr;
+							resultBlockL2.pData = nullptr;
+						} // this "}" is for omp
+					} // j
+				} // k
+			} // i
+
+			delete[]   pLeftBlockL2Big;
+			delete[]  pRightBlockL2Big;
+			delete[] pResultBlockL2Big;
+			return result;
+		} // this "}" is for if constexpr mat, mat
+		return mat(0, 0, nullptr);
+	}
+
+	rowVec operator[](int loc) const { // note: just provide a convenient path to get element by coordinations, no performance takes into account...
+		if (loc >= rows) {
+			std::stringstream message;
+			message << "operator[]row Error loc: " << loc << " rows: " << rows << '\n';
+			std::cerr << message.str();
+			throw std::runtime_error(message.str());
+		}
+		NumType* data = new NumType[cols];
+		memcpy(data, pData + loc * cols, sizeof(NumType) * cols);
+		return { cols, data };
+	}
+
+	////////////////////////////////////////////
+
+	// /* tools ////////////////////////////////
+public:
+	void print() const {
+		for (int i = 0; i < rows; ++i) {
+			for (int j = 0; j < cols; ++j) {
+				printf("%.2f ", pData[i * cols + j]);
+			}
+			std::cout << '\n';
+		}
+	}
+	////////////////////////////////////////////
+};
