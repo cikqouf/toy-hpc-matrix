@@ -5,13 +5,13 @@
 #include "mat.hpp"
 
 static void BM_MatMul(benchmark::State& state) {
-    using T = float;
+    using T = int;
 
     int64_t p = state.range(0);
     int64_t q = state.range(1);
     int64_t s = state.range(2);
 
-    std::normal_distribution<T> dist(0., 1.);
+    std::uniform_int_distribution<T> dist(0, 5);
 
     mat<T> A(p, q, dist);
     mat<T> B(q, s, dist);

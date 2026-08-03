@@ -16,14 +16,14 @@ namespace unitTestCorrectness
 
         void CheckMatMul(int p, int q, int s)
         {
-            using T = float;
+            using T = int;
 
-            std::normal_distribution<T> dist(0., 1.);
+            std::uniform_int_distribution<T> dist(0, 5);
             mat<T> A(p, q, dist);
             mat<T> B(q, s, dist);
 
             mat<T> C = A * B;
-            mat<T> C2(p, s, 0.0);
+            mat<T> C2(p, s, 0);
 
             for (int i = 0; i < p; ++i)
                 for (int k = 0; k < q; ++k)

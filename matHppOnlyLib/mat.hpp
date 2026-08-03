@@ -92,6 +92,25 @@ struct MatNumType<mat<T>>;
 
 /*****************************************************************/
 
+template <typename InNumType>
+struct NumTypeSize {
+	static constexpr size_t L3Y = 768; // 768
+	static constexpr size_t L3X = 512; // 512
+	static constexpr size_t L3Z = 768; // 768
+	static constexpr size_t LEFTSIZEL3 = L3Y * L3X;
+	static constexpr size_t RIGHTSIZEL3 = L3X * L3Z;
+
+	static constexpr size_t L2Y = 768; // 768
+	static constexpr size_t L2X = 256; // 256
+	static constexpr size_t L2Z = 768; // 768
+	static constexpr size_t LEFTSIZEL2 = L2Y * L2X;
+	static constexpr size_t RIGHTSIZEL2 = L2X * L2Z;
+
+	static constexpr size_t L1Y = 8; // 8
+	static constexpr size_t L1X = 256; // 256
+	static constexpr size_t L1Z = 8; // 8
+};
+
 template<>
 struct NumTypeSize<float> {
 
@@ -1212,6 +1231,23 @@ __pragma(omp for)																			      \
 																				leftPtr[leftStrideOffset] *
 																				rightPtr[rightStrideOffset + jjjj];
 																		}
+																	}
+																}
+															}
+														}
+														else { /* fallback 朴素三循环 */
+															size_t resultIOffset = (i + ii + iii) * s;
+															size_t resultJOffset = j + jj + jjj;
+															for (size_t iiii = 0; iiii < tmpLeftBlockL1Rows; ++iiii) {
+																size_t resultIOffsetLoop = iiii * s;
+																size_t resultTotalOffset = resultIOffset + resultIOffsetLoop + resultJOffset;
+																for (size_t kkkk = 0; kkkk < tmpLeftBlockL1Cols; ++kkkk) {
+																	size_t leftStrideOffset = kkkk * tmpLeftBlockL1Rows + iiii;
+																	size_t rightStrideOffset = kkkk * tmpRightBlockL1Cols;
+																	for (size_t jjjj = 0; jjjj < tmpRightBlockL1Cols; ++jjjj) {
+																		result.pData[resultTotalOffset + jjjj] +=
+																			leftPtr[leftStrideOffset] *
+																			rightPtr[rightStrideOffset + jjjj];
 																	}
 																}
 															}
